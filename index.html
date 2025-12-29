@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>萝卜猫 CarrotCat</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, "PingFang SC", "Noto Sans CJK SC", Arial; margin: 0; background:#f6f7fb; }
+    .wrap { max-width: 960px; margin: 0 auto; padding: 16px; }
+    .card { background: white; border-radius: 16px; padding: 16px; box-shadow: 0 8px 24px rgba(0,0,0,.06); }
+    canvas { width: 100%; height: 420px; display:block; border-radius: 12px; background: linear-gradient(#eaf3ff, #ffffff); }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-top: 12px; }
+    input { flex: 1; min-width: 220px; padding: 10px 12px; border-radius: 10px; border:1px solid #d7dbe7; font-size: 16px; }
+    button { padding: 10px 14px; border-radius: 10px; border:0; background:#111827; color:white; font-size: 16px; cursor:pointer; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    .hint { color:#6b7280; font-size: 13px; margin-top: 8px; }
+    .log { margin-top: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; color:#374151; background:#f3f4f6; padding: 10px; border-radius: 12px; white-space: pre-wrap; }
+    .badge { display:inline-block; padding:2px 10px; border-radius:999px; background:#eef2ff; color:#3730a3; font-size:12px; margin-left: 8px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h2 style="margin:0 0 8px 0;">萝卜猫 <span class="badge">强化学习赛博猫</span></h2>
+      <canvas id="scene" width="960" height="420"></canvas>
+
+      <div class="row">
+        <button id="q1">🧻</button>
+        <button id="q2">🥕</button>
+        <button id="askBtn" disabled>加载模型中...</button>
+        <button id="awesomeBtn">真棒</button>
+      </div>
+
+      <div class="hint">
+        操作：键盘 ← → 可以手动移动猫；点击🧻或🥕按钮直接提问，或点击“随机提问”让模型随机选择问题。<br>
+        当猫答对时，点击“真棒”按钮让猫跳起来吃小鱼干，然后转圈庆祝！
+      </div>
+
+      <div class="log" id="log">log:\n- 正在加载 onnxruntime-web...\n</div>
+    </div>
+  </div>
+
+  <!-- onnxruntime-web (纯 JS) -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+
+  <script>
+    const MODEL_URL = "./models/luobo_cat_policy.onnx";
+    const SPEED = 5;
+    const canvas = document.getElementById("scene");
+    const ctx = canvas.getContext("2d");
+    const logEl = document.getElementById("log");
+    const askBtn = document.getElementById("askBtn");
+    const q1Btn = document.getElementById("q1");
+    const q2Btn = document.getElementById("q2");
+    const awesomeBtn = document.getElementById("awesomeBtn");
+
+    let session = null;
+    let catCorrect = false;
+    let spinning = false;
+    let spinAngle = 0;
+    let fishJerky = { x: 0, y: -50, active: false, speed: 2 };
+    let catJumpOffset = 0;
+    let jumping = false;
+
+    // 场景布局（像素坐标）
+    const floorY = 310;
+
+    const tissue = { x: 240, y: floorY, w: 120, h: 70, label: "纸巾", obs: 0, emoji: "🧻" };
+    const carrot = { x: 600, y: floorY, w: 120, h: 70, label: "萝卜", obs: 1, emoji: "🥕" };
+
+    // 猫
+    const cat = {
+      x: 80,
+      y: floorY - 90,
+      targetX: 80,
+      w: 90,
+      h: 90,
+      facing: 1, // 1 right, -1 left
+      pawDown: false,
+      pawTimer: 0
+    };
+
+    function log(msg) {
+      logEl.textContent += msg + "\n";
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    /********************
+     * 绘制
+     ********************/
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // 地面
+      ctx.fillStyle = "rgba(0,0,0,0.06)";
+      ctx.fillRect(0, floorY + 70, canvas.width, 8);
+
+      // 物体
+      drawObject(tissue, "#e5e7eb");
+      drawObject(carrot, "#fde68a");
+
+      // 猫
+      drawCat();
+
+      // 小鱼干
+      if (fishJerky.active) {
+        // 背景圆
+        ctx.fillStyle = "white";
+        ctx.beginPath();
+        ctx.arc(fishJerky.x + 12, fishJerky.y - 10, 20, 0, Math.PI * 2);
+        ctx.fill();
+        // 表情
+        ctx.font = "32px system-ui";
+        ctx.fillText("🐟", fishJerky.x, fishJerky.y);
+      }
+
+      // 提示线（猫目标）
+      ctx.strokeStyle = "rgba(59, 130, 246, 0.35)";
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath();
+      ctx.moveTo(cat.x + cat.w/2, cat.y + cat.h);
+      ctx.lineTo(cat.targetX + cat.w/2, cat.y + cat.h);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    function drawObject(obj, color) {
+      // 盒子
+      ctx.fillStyle = color;
+      roundRect(ctx, obj.x, obj.y, obj.w, obj.h, 14);
+      ctx.fill();
+
+      // 表情
+      ctx.fillStyle = "#111827";
+      ctx.font = "32px system-ui";
+      ctx.fillText(obj.emoji, obj.x + 38, obj.y + 42);
+
+      // 底座
+      ctx.fillStyle = "rgba(0,0,0,0.08)";
+      roundRect(ctx, obj.x + 10, obj.y + obj.h - 8, obj.w - 20, 16, 10);
+      ctx.fill();
+    }
+
+    function drawCat() {
+      ctx.save();
+      const centerX = cat.x + cat.w / 2;
+      const centerY = cat.y + cat.h / 2 + catJumpOffset;
+      ctx.translate(centerX, centerY);
+      ctx.rotate(spinAngle);
+      ctx.translate(-centerX, -centerY);
+
+      // 背景圆
+      ctx.fillStyle = "white";
+      ctx.beginPath();
+      ctx.arc(cat.x + 45, cat.y + 45 + catJumpOffset, 40, 0, Math.PI * 2);
+      ctx.fill();
+
+      // 猫表情
+      ctx.font = "48px system-ui";
+      ctx.fillText("🐱", cat.x + 10, cat.y + 60 + catJumpOffset);
+
+      ctx.restore();
+
+      // 脚掌（pawDown 时画一个小爪印）
+      if (cat.pawDown) {
+        ctx.fillStyle = "rgba(239,68,68,0.85)";
+        const pawX = cat.x + cat.w/2 + (cat.facing * 20);
+        const pawY = cat.y + cat.h + 8 + catJumpOffset;
+        ctx.beginPath(); ctx.arc(pawX, pawY, 7, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(pawX - 10, pawY - 6, 4, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(pawX + 10, pawY - 6, 4, 0, Math.PI*2); ctx.fill();
+      }
+    }
+
+    function roundRect(ctx, x, y, w, h, r) {
+      const min = Math.min(w, h);
+      if (r > min/2) r = min/2;
+      ctx.beginPath();
+      ctx.moveTo(x+r, y);
+      ctx.arcTo(x+w, y,   x+w, y+h, r);
+      ctx.arcTo(x+w, y+h, x,   y+h, r);
+      ctx.arcTo(x,   y+h, x,   y,   r);
+      ctx.arcTo(x,   y,   x+w, y,   r);
+      ctx.closePath();
+    }
+
+    function tick() {
+      // 移动猫到 targetX
+      const dx = cat.targetX - cat.x;
+      if (Math.abs(dx) > 1) {
+        cat.x += Math.sign(dx) * SPEED;
+        cat.facing = Math.sign(dx);
+      }
+
+      // pawDown 定时消失
+      if (cat.pawDown) {
+        cat.pawTimer -= 1;
+        if (cat.pawTimer <= 0) {
+          cat.pawDown = false;
+        }
+      }
+
+      // 旋转逻辑
+      if (spinning) {
+        spinAngle += 0.1;
+        if (spinAngle > 2 * Math.PI) {
+          spinning = false;
+          spinAngle = 0;
+        }
+      }
+
+      // 小鱼干掉落
+      if (fishJerky.active) {
+        fishJerky.y += fishJerky.speed;
+        // 检测是否掉到猫上方并吃掉
+        const catCenterX = cat.x + cat.w / 2;
+        const catTopY = cat.y + catJumpOffset;
+        if (fishJerky.y >= catTopY - 20 && Math.abs(fishJerky.x - catCenterX) < 30) {
+          fishJerky.active = false;
+          jumping = true;
+          log("🐱 猫咪跳起来吃掉了小鱼干！");
+        } else if (fishJerky.y > canvas.height) {
+          fishJerky.active = false;
+        }
+      }
+
+      // 跳跃逻辑
+      if (jumping) {
+        catJumpOffset -= 5; // 向上跳
+        if (catJumpOffset <= -50) { // 跳到最高点
+          jumping = false;
+        }
+      } else if (catJumpOffset < 0) {
+        catJumpOffset += 2; // 落下
+        if (catJumpOffset >= 0) {
+          catJumpOffset = 0;
+        }
+      }
+
+      draw();
+      requestAnimationFrame(tick);
+    }
+
+    async function loadModel() {
+      try {
+        log(`- 加载模型: ${MODEL_URL}`);
+        session = await ort.InferenceSession.create(MODEL_URL, {
+          executionProviders: ["wasm"],
+        });
+        log("- ✅ 模型加载成功！");
+        askBtn.disabled = false;
+        askBtn.textContent = "随机提问";
+      } catch (e) {
+        console.error(e);
+        log("- ❌ 模型加载失败，请检查路径与浏览器控制台报错。");
+        askBtn.disabled = true;
+        askBtn.textContent = "模型加载失败";
+      }
+    }
+
+    // 把输入（纸巾/萝卜）转换成模型观测：0 或 1
+    function parseQuestion(text) {
+      const t = String(text || "").trim();
+      if (t === "纸巾") return 0;
+      if (t === "萝卜") return 1;
+      return null;
+    }
+
+    async function answerByModel(questionObs) {
+      if (!session) throw new Error("模型未加载");
+
+      const obsData = new Float32Array([questionObs]);
+      const obsTensor = new ort.Tensor("float32", obsData, [1, 1]);
+
+      const feeds = { obs: obsTensor };
+      const results = await session.run(feeds);
+
+      // 输出 action: int64 tensor shape [1]
+      const actionTensor = results.action;
+      let action = actionTensor.data[0];
+      if (typeof action === "bigint") action = Number(action);
+
+      return action;
+    }
+
+    function moveCatToAction(action) {
+      // action 0=踩纸巾, 1=踩萝卜
+      const target = (action === 0) ? tissue : carrot;
+
+      cat.targetX = target.x + target.w/2 - cat.w/2;
+
+      const check = setInterval(() => {
+        if (Math.abs(cat.targetX - cat.x) < 6) {
+          clearInterval(check);
+          cat.pawDown = true;
+          cat.pawTimer = 60; // 大约 1 秒
+        }
+      }, 30);
+    }
+
+    /********************
+     * 提问函数
+     ********************/
+    async function askQuestion(q) {
+      const qText = (q === 0 ? "🧻" : "🥕");
+      log(`\n[提问] 人类问：${qText}`);
+
+      try {
+        const action = await answerByModel(q);
+        const target = action === 0 ? "🧻" : "🥕";
+        log(`[模型输出] action=${action} → 猫把脚掌放在：${target}`);
+        catCorrect = (action === q);
+        if (catCorrect) {
+          log("✅ 答对了！点击“真棒”让猫转圈庆祝！");
+        } else {
+          log("❌ 答错了。");
+        }
+        moveCatToAction(action);
+      } catch (e) {
+        console.error(e);
+        log("- ❌ 推理失败，请检查模型输入/输出名是否匹配，以及控制台错误。");
+      }
+    }
+
+    q1Btn.addEventListener("click", () => askQuestion(0));
+
+    q2Btn.addEventListener("click", () => askQuestion(1));
+
+    askBtn.addEventListener("click", async () => {
+      const q = Math.random() < 0.5 ? 0 : 1;
+      askQuestion(q);
+    });
+
+    awesomeBtn.addEventListener("click", () => {
+      if (catCorrect) {
+        spinning = true;
+        spinAngle = 0;
+        fishJerky.x = cat.x + cat.w / 2 - 12; // 猫中心，表情宽度约24
+        fishJerky.y = -50;
+        fishJerky.active = true;
+        log("🎉 猫咪转圈庆祝！小鱼干掉下来啦！");
+      } else {
+        log("猫咪还没答对呢，先让它答对吧！");
+      }
+    });
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowLeft")  { cat.targetX = Math.max(0, cat.targetX - 40); cat.facing = -1; }
+      if (e.key === "ArrowRight") { cat.targetX = Math.min(canvas.width - cat.w, cat.targetX + 40); cat.facing = 1; }
+      if (e.key === " ") { cat.pawDown = true; cat.pawTimer = 60; } // 空格放脚掌
+    });
+
+    tick();
+    loadModel();
+  </script>
+</body>
+</html>

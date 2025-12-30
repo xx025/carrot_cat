@@ -40,6 +40,11 @@
     </div>
   </div>
 
+  <!-- 音频元素 -->
+  <audio id="paperAudio" src="static/music/paper.MP3" preload="auto"></audio>
+  <audio id="carrotAudio" src="static/music/carrot.MP3" preload="auto"></audio>
+  <audio id="goodAudio" src="static/music/good.MP3" preload="auto"></audio>
+
   <!-- onnxruntime-web (纯 JS) -->
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
 
@@ -53,6 +58,11 @@
     const q1Btn = document.getElementById("q1");
     const q2Btn = document.getElementById("q2");
     const awesomeBtn = document.getElementById("awesomeBtn");
+
+    // 音频元素
+    const paperAudio = document.getElementById("paperAudio");
+    const carrotAudio = document.getElementById("carrotAudio");
+    const goodAudio = document.getElementById("goodAudio");
 
     let session = null;
     let catCorrect = false;
@@ -322,17 +332,29 @@
       }
     }
 
-    q1Btn.addEventListener("click", () => askQuestion(0));
+    q1Btn.addEventListener("click", () => {
+      paperAudio.play();
+      askQuestion(0);
+    });
 
-    q2Btn.addEventListener("click", () => askQuestion(1));
+    q2Btn.addEventListener("click", () => {
+      carrotAudio.play();
+      askQuestion(1);
+    });
 
     askBtn.addEventListener("click", async () => {
       const q = Math.random() < 0.5 ? 0 : 1;
+      if (q === 0) {
+        paperAudio.play();
+      } else {
+        carrotAudio.play();
+      }
       askQuestion(q);
     });
 
     awesomeBtn.addEventListener("click", () => {
       if (catCorrect) {
+        goodAudio.play();
         spinning = true;
         spinAngle = 0;
         fishJerky.x = cat.x + cat.w / 2 - 12; // 猫中心，表情宽度约24
